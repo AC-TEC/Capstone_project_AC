@@ -231,11 +231,13 @@ export async function InsertToJobUpdatesTable(supabase: SupabaseClient, job_Id: 
     }
 
     const existingUpdatedAt = jobRow.updated_at;
-    const incomingTime = new Date(incomingAtsUpdatedAt).getTime();
-    const existingTime = new Date(existingUpdatedAt).getTime();
-
-    // 2. Insert into job_updates ONLY if incoming is newer
-    if (incomingTime > existingTime) {
+    
+    if (!incomingAtsUpdatedAt) {
+      return false;
+    }
+    
+    if (!existingUpdatedAt) {
+      // If no existing updated_at, treat as new update
       const { error: updateError } = await supabase
         .from("job_updates")
         .insert({
@@ -246,17 +248,51 @@ export async function InsertToJobUpdatesTable(supabase: SupabaseClient, job_Id: 
       if (updateError) {
         console.error("[InsertToJobUpdates] Failed to insert job_update:", updateError);
       }
+      
+      // Always update last_seen
+      const { error: seenError } = await supabase
+        .from("jobs")
+        .update({ last_seen: new Date().toISOString() })
+        .eq("id", job_Id);
+
+      if (seenError) {
+        console.error("[InsertToJobUpdates] Failed to update last_seen:", seenError);
+      }
+      
+      return !updateError;
+    }
+    
+    const incomingTime = new Date(incomingAtsUpdatedAt).getTime();
+    const existingTime = new Date(existingUpdatedAt).getTime();
+
+    // 2. Insert into job_updates ONLY if incoming is newer
+    let inserted = false;
+    if (incomingTime > existingTime) {
+      const { error: updateError } = await supabase
+        .from("job_updates")
+        .insert({
+          job_id: job_Id,
+          ats_updated_at: incomingAtsUpdatedAt
+        });
+
+      if (updateError) {
+        console.error("[InsertToJobUpdates] Failed to insert job_update:", updateError);
+      } else {
+        inserted = true;
+      }
     }
 
-  // Step 3: Always update last_seen
-  const { error: seenError } = await supabase
-    .from("jobs")
-    .update({ last_seen: new Date().toISOString() })
-    .eq("id", job_Id);
+    // Step 3: Always update last_seen
+    const { error: seenError } = await supabase
+      .from("jobs")
+      .update({ last_seen: new Date().toISOString() })
+      .eq("id", job_Id);
 
-  if (seenError) {
-    console.error("[InsertToJobUpdates] Failed to update last_seen:", seenError);
-  }
+    if (seenError) {
+      console.error("[InsertToJobUpdates] Failed to update last_seen:", seenError);
+    }
+    
+    return inserted;
 }
 
 
@@ -278,6 +314,39 @@ export async function InsertIntoJobFeaturesTable(supabase: SupabaseClient, jobFe
   if (error) {
     console.error("Error upserting job_features:", error);
   }
+}
+
+/**
+ * Fetch update timestamps from job_updates table for cadence analysis.
+ * Returns array of ats_updated_at timestamps, sorted chronologically.
+ * Only fetches the latest 50 entries to avoid expensive operations on large datasets.
+ */
+export async function getJobUpdateTimestamps(
+  supabase: SupabaseClient,
+  jobId: string
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("job_updates")
+    .select("ats_updated_at")
+    .eq("job_id", jobId)
+    .order("ats_updated_at", { ascending: false }) // Most recent first
+    .limit(50); // Limit to latest 50 entries (enough to detect patterns)
+
+  if (error) {
+    console.error("[getJobUpdateTimestamps] Failed to fetch job updates:", error);
+    return [];
+  }
+
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  // Extract and filter valid timestamps, then reverse to chronological order
+  // (oldest first) for cadence analysis
+  return data
+    .map(row => row.ats_updated_at)
+    .filter((ts): ts is string => ts !== null && ts !== undefined)
+    .reverse(); // Reverse to get chronological order (oldest to newest)
 }
 
 export async function InsertStructuredJobFeatures(supabase: SupabaseClient, job_Id: string, jobDetails: AdapterJob) {

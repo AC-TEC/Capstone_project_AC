@@ -41,6 +41,9 @@ export interface AtsJobInput {
   
   // NLP analysis (optional for backward compatibility)
   nlp_analysis?: NlpAnalysis;
+  
+  // Update cadence data (optional, only for ATS jobs with sufficient history)
+  update_cadence_data?: string[]; // Array of ats_updated_at timestamps from job_updates table
 }
 
 export interface WebFeaturesInput {
@@ -69,19 +72,23 @@ export interface ScoreWeights {
   skills_present: number;
   buzzword_penalty: number;
   comp_period_clarity: number;
+  // Update cadence
+  update_cadence: number;
 }
 
 // Sensible defaults; override per-call if needed
 export const DEFAULT_WEIGHTS: ScoreWeights = {
-  freshness: 0.20,
+  freshness: 0.18,
   link_integrity: 0.10,
-  salary_disclosure: 0.25,
-  salary_min_present: 0.15,
+  salary_disclosure: 0.23,
+  salary_min_present: 0.14,
   source_credibility: 0.10,
   // NLP signals
   skills_present: 0.10,
   buzzword_penalty: 0.05,
   comp_period_clarity: 0.05,
+  // Update cadence (reduced other weights slightly to fit)
+  update_cadence: 0.05,
 };
 
 export interface ScoreResult {
@@ -223,6 +230,64 @@ function featureCompPeriodClarity(analysis?: NlpAnalysis): number {
   return 1; // Any detection (hour/year) is good clarity
 }
 
+/**
+ * Update cadence: analyzes regularity of job posting updates.
+ * - Returns 0.5 (neutral) if < 4 updates (insufficient data)
+ * - Returns 1.0 (good) if updates are irregular/unpredictable
+ * - Returns 0.0 (bad) if updates are regular/predictable (ghost job indicator)
+ * 
+ * Regularity is determined by calculating intervals between updates and checking
+ * if they're similar (within 20% variance threshold).
+ */
+function featureUpdateCadence(updateTimestamps?: string[]): number {
+  if (!updateTimestamps || updateTimestamps.length < 4) {
+    return 0.5; // Not enough data: neutral
+  }
+
+  // Sort timestamps chronologically
+  const sorted = [...updateTimestamps]
+    .map(ts => new Date(ts).getTime())
+    .filter(ts => Number.isFinite(ts))
+    .sort((a, b) => a - b);
+
+  if (sorted.length < 4) {
+    return 0.5; // After filtering invalid dates, still not enough
+  }
+
+  // Calculate intervals between consecutive updates (in days)
+  const intervals: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const days = (sorted[i] - sorted[i - 1]) / (1000 * 60 * 60 * 24);
+    intervals.push(days);
+  }
+
+  if (intervals.length === 0) {
+    return 0.5;
+  }
+
+  // Calculate mean and standard deviation of intervals
+  const mean = intervals.reduce((sum, val) => sum + val, 0) / intervals.length;
+  const variance = intervals.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / intervals.length;
+  const stdDev = Math.sqrt(variance);
+
+  // Coefficient of variation (CV) = stdDev / mean
+  // High CV = irregular (good), Low CV = regular (bad)
+  const coefficientOfVariation = mean > 0 ? stdDev / mean : 0;
+
+  // If CV is very low (< 0.2), updates are very regular → ghost job indicator
+  // If CV is high (> 0.5), updates are irregular → legitimate job
+  // Map CV to score: CV < 0.2 → 0.0, CV > 0.5 → 1.0, linear in between
+  if (coefficientOfVariation < 0.2) {
+    return 0.0; // Very regular: strong ghost job signal
+  } else if (coefficientOfVariation > 0.5) {
+    return 1.0; // Very irregular: legitimate job
+  } else {
+    // Linear interpolation between 0.2 and 0.5 CV
+    const normalized = (coefficientOfVariation - 0.2) / (0.5 - 0.2);
+    return clamp01(normalized);
+  }
+}
+
 // --- Aggregator (hardened) ---------------------------------------------------
 
 /**
@@ -294,6 +359,11 @@ export function scoreJob(
   breakdown.skills_present = featureSkillsPresent(input.nlp_analysis);
   breakdown.buzzword_penalty = featureBuzzwordPenalty(input.nlp_analysis);
   breakdown.comp_period_clarity = featureCompPeriodClarity(input.nlp_analysis);
+
+  // Update cadence (only for ATS jobs with update history)
+  if (input.update_cadence_data) {
+    breakdown.update_cadence = featureUpdateCadence(input.update_cadence_data);
+  }
 
   const score = finalizeScore(breakdown, weights ?? DEFAULT_WEIGHTS);
 

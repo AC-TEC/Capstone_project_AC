@@ -1,7 +1,7 @@
 // Main orchestrator that coordinates scraper, NLP, scoring, and DB
 
 import { scrapeJobFromUrl } from "@/app/other/scraper";
-import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures } from "@/utils/supabase/action";
+import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures, InsertToJobUpdatesTable, getJobUpdateTimestamps } from "@/utils/supabase/action";
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { analyzeAdapterJob, Combined } from "@/app/api/data-ingestion/nlp/client";
 import { analysisWithLLM } from "@/app/api/data-ingestion/nlp/index";
@@ -61,9 +61,21 @@ function generateRecommendations(breakdown: Record<string, number>): string[] {
     }
   }
   
-  // Freshness recommendation
-  if (breakdown.freshness < 0.5) {
-    recommendations.push("This posting may be stale. Verify the position is still actively hiring (posted >30 days ago).");
+  // Update cadence and freshness recommendations (check for combined case first)
+  const hasPredictableCadence = breakdown.update_cadence !== undefined && breakdown.update_cadence < 0.5;
+  const hasStalePosting = breakdown.freshness < 0.5;
+  
+  if (hasPredictableCadence && hasStalePosting) {
+    // Combined message when both flags are present
+    recommendations.push("This job is both stale and refreshes in a predictable pattern. These two signals combined is a stronger signal of automated efforts to make a ghost job appear active.");
+  } else {
+    // Individual messages
+    if (hasStalePosting) {
+      recommendations.push("This posting may be stale. Verify the position is still actively hiring (posted >30 days ago).");
+    }
+    if (hasPredictableCadence) {
+      recommendations.push("This job refreshes in a predictable pattern, which could indicate automated efforts to make a ghost job appear active.");
+    }
   }
   
   return recommendations;
@@ -110,6 +122,7 @@ export async function analyzeJob(
     type JobWithFeatures = {
       id: string;
       last_seen: string | null;
+      updated_at: string | null;
       job_features?: Array<Combined>;
     };
 
@@ -137,11 +150,32 @@ export async function analyzeJob(
         console.log(`[analyzeJob] Using cached ATS job: ${jobId}`);
       } else {
         // 3b. New ATS job OR stale ATS job - scrape and save/update
+        
+        // For existing jobs: Record update BEFORE updating the jobs table
+        // This ensures we compare the incoming updated_at with the OLD value in the database
+        if (existingJob) {
+          await InsertToJobUpdatesTable(supabase, existingJob.id, adapterJob);
+        }
+        
         // Upsert will create new row or update existing, returns ID
         jobId = await insertIntoJobTable(supabase, adapterJob);
         
         if (!jobId) {
           return { success: false, error: "Failed to save job to database" };
+        }
+
+        // For new jobs: Always record the first update (insert directly since comparison would fail)
+        if (!existingJob && adapterJob.updated_at) {
+          const { error } = await supabase
+            .from("job_updates")
+            .insert({
+              job_id: jobId,
+              ats_updated_at: adapterJob.updated_at
+            });
+          
+          if (error) {
+            console.error("[analyzeJob] Failed to insert first job update:", error);
+          }
         }
 
         // Run NLP analysis to get features
@@ -186,7 +220,17 @@ export async function analyzeJob(
     
     console.log(`[analyzeJob] NLP extracted ${nlpAnalysis.skills.length} skills:`, nlpAnalysis.skills.map(s => s.name).slice(0, 5));
 
-    // 5. Combine features with NLP analysis for scoring
+    // 5. Fetch update cadence data for ATS jobs (only if job exists in DB)
+    let updateCadenceData: string[] | undefined = undefined;
+    if (ats_provider !== "web" && jobId) {
+      updateCadenceData = await getJobUpdateTimestamps(supabase, jobId);
+      // Only include if we have at least 4 updates (baseline for pattern detection)
+      if (updateCadenceData.length < 4) {
+        updateCadenceData = undefined; // Not enough data, don't include in scoring
+      }
+    }
+
+    // 6. Combine features with NLP analysis for scoring
     const scoringInput: AtsJobInput = {
       source: (ats_provider === "web" ? "web" : "ats") as "ats" | "web",
       absolute_url: adapterJob.absolute_url,
@@ -201,10 +245,11 @@ export async function analyzeJob(
         skills: nlpAnalysis.skills,
         buzzwords: nlpAnalysis.buzzwords,
         comp_period_detected: nlpAnalysis.comp_period_detected
-      }
+      },
+      update_cadence_data: updateCadenceData
     };
 
-    // 6. Score the job
+    // 7. Score the job
     const scoreResult = await scoreJob(scoringInput);
     console.log(`[analyzeJob] Score breakdown:`, scoreResult.breakdown);
     const tier: Tier = scoreResult.score < 0.4 ? "High" : scoreResult.score < 0.7 ? "Medium" : "Low";

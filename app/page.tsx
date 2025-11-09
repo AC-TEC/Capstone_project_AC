@@ -422,6 +422,7 @@ export default function GhostJobChecker() {
                             skills_present: "Vague skill requirements",
                             skills_detected: "Few specific skills mentioned", // legacy key
                             source_credibility: "Low employer credibility",
+                            update_cadence: "Predictable refresh rate",
                           };
                           
                           // Use mapped message or default to original flag with better formatting

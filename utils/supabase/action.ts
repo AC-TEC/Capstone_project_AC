@@ -3,6 +3,7 @@ import { createClient } from "./server";
 import { redirect } from "next/navigation";
 import type { AdapterJob } from "@/app/api/data-ingestion/adapters/types";   
 import type { dbJobFeatures } from "@/app/db/jobFeatures";   
+import type { dbJobSnapshot } from "@/app/db/jobSnapshots";
 import {analyzeAdapterJob} from "@/app/api/data-ingestion/nlp/client";
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -194,7 +195,7 @@ const jobInsert = {
   content,
   raw_json,
 }
-  
+
   const { data: jobId, error } = await supabase
     .from('jobs')
     .upsert([jobInsert], { onConflict: 'ats,tenant_slug,external_job_id' }) // composite key either returns new key or reuse if duplicate
@@ -419,8 +420,73 @@ export async function getJobByCompositeKey(
 }
 
 
+/**
+ * Create a new job snapshot in the database
+ * 
+ * param: snapshot - Complete snapshot data with all hashes computed
+ * returns: true if successful, false if error
+ */
+export async function createJobSnapshot(
+  supabase: SupabaseClient,
+  snapshot: dbJobSnapshot
+): Promise<boolean> {
+  const {
+    job_id,
+    ats_updated_at,
+    raw_json,
+    content_hash,
+    metadata_hash,
+    content_simhash,
+    metadata_simhash,
+  } = snapshot;
+
+  const snapshotInsert = {
+    job_id,
+    snapshot_at: new Date().toISOString(),
+    ats_updated_at,
+    raw_json,
+    content_hash,
+    metadata_hash,
+    content_simhash,
+    metadata_simhash,
+  };
+
+  const { error } = await supabase
+    .from('job_snapshots')
+    .insert(snapshotInsert);
+
+  if (error) {
+    console.error('[createJobSnapshot] Failed to create snapshot:', error);
+    return false;
+  }
+
+  return true;
+}
 
 
+/**
+ * Get the most recent snapshot for a specific job
+ * Used to compare against new data to detect changes
+ * 
+ * returns: Latest snapshot or null if none exists
+ */
+export async function getLatestSnapshotForJob(
+  supabase: SupabaseClient,
+  jobId: string
+): Promise<dbJobSnapshot | null> {
+  const { data, error } = await supabase
+    .from('job_snapshots')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('snapshot_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
+  if (error) {
+    console.error('[getLatestSnapshotForJob] Error fetching snapshot:', error);
+    return null;
+  }
 
+  return data;
+}
 

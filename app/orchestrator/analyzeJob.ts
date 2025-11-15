@@ -1,7 +1,7 @@
 // Main orchestrator that coordinates scraper, NLP, scoring, and DB
 
 import { scrapeJobFromUrl } from "@/app/other/scraper";
-import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures, InsertToJobUpdatesTable, getJobUpdateTimestamps } from "@/utils/supabase/action";
+import { getJobByCompositeKey, insertIntoJobTable, InsertStructuredJobFeatures, InsertToJobUpdatesTable, getJobUpdateTimestamps, createJobSnapshot, getLatestSnapshotForJob } from "@/utils/supabase/action";
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { analyzeAdapterJob, Combined } from "@/app/api/data-ingestion/nlp/client";
 import { analysisWithLLM } from "@/app/api/data-ingestion/nlp/index";
@@ -9,6 +9,7 @@ import { scoreJob, type AtsJobInput, type AtsJobFeatures } from "@/app/scoring/s
 import type { analysis } from "@/app/api/data-ingestion/nlp/index";
 import { parseGreenhouseTenantAndJob } from "@/app/api/data-ingestion/adapters/util";
 import type { AdapterJob } from "@/app/api/data-ingestion/adapters/types";
+import { createSnapshotData, hasContentChanged } from "@/app/db/jobSnapshots";
 
 export type Tier = "Low" | "Medium" | "High";
 
@@ -287,6 +288,32 @@ export async function analyzeJob(
         
         // Save features to DB
         await InsertStructuredJobFeatures(supabase, jobId, adapterJob);
+        
+        //SNAPSHOT LOGIC: Track job changes over time
+        //Create snapshot data from the current job data
+        const newSnapshotData = createSnapshotData(jobId, adapterJob);
+        
+        if (!existingJob) {
+          //New job: Always create first snapshot
+          await createJobSnapshot(supabase, newSnapshotData);
+          console.log(`[analyzeJob] Created first snapshot for new ATS job: ${jobId}`);
+        } else {
+          //Existing job: Check if content changed before creating snapshot
+          const latestSnapshot = await getLatestSnapshotForJob(supabase, jobId);
+          
+          if (!latestSnapshot) {
+            //Job exists but no snapshot yet - create one
+            await createJobSnapshot(supabase, newSnapshotData);
+            console.log(`[analyzeJob] Created first snapshot for existing ATS job: ${jobId}`);
+          } else if (hasContentChanged(latestSnapshot, newSnapshotData)) {
+            //Content changed - create new snapshot
+            await createJobSnapshot(supabase, newSnapshotData);
+            console.log(`[analyzeJob] Job content changed - created new snapshot for: ${jobId}`);
+          } else {
+            //No changes detected - no snapshot needed
+            console.log(`[analyzeJob] No content changes detected for: ${jobId}`);
+          }
+        }
         
         if (existingJob) {
           console.log(`[analyzeJob] Updated stale ATS job: ${jobId}`);

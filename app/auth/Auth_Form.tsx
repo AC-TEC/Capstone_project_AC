@@ -38,7 +38,7 @@ const Auth_Form = ({
     );
     // if its signup page it will auto redirect to login page via middleware so the following line is fine.
     if (is_login) {
-      router.push("/job-buster");
+      router.push("/");
     }
   }
 

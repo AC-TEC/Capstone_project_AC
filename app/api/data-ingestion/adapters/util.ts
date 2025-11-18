@@ -288,3 +288,15 @@ export function extractSalaryFromTextCore(text: string): {
   };
 }
 
+/**
+ * Parse tenant + job ID from common Greenhouse board URL forms:
+ *   - /{tenant}/jobs/{jobId}
+ *   - /{tenant}/jobs/{jobId}/... (extra segments ok)
+ * Returns null if not matched.
+ */
+export function parseGreenhouseTenantAndJob(url: URL): { tenant: string; jobId: string } | null {
+  const m = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)(?:\/|$)/);
+  if (!m) return null;
+  return { tenant: m[1], jobId: m[2] };
+}
+

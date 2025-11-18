@@ -193,6 +193,7 @@ const jobInsert = {
   requisition_id,
   content,
   raw_json,
+  is_active: true,
 }
   
   const { data: jobId, error } = await supabase

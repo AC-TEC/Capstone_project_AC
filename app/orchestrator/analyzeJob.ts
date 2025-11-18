@@ -7,6 +7,8 @@ import { analyzeAdapterJob, Combined } from "@/app/api/data-ingestion/nlp/client
 import { analysisWithLLM } from "@/app/api/data-ingestion/nlp/index";
 import { scoreJob, type AtsJobInput, type AtsJobFeatures } from "@/app/scoring/score";
 import type { analysis } from "@/app/api/data-ingestion/nlp/index";
+import { parseGreenhouseTenantAndJob } from "@/app/api/data-ingestion/adapters/util";
+import type { AdapterJob } from "@/app/api/data-ingestion/adapters/types";
 
 export type Tier = "Low" | "Medium" | "High";
 
@@ -18,11 +20,84 @@ export interface RiskResult {
 }
 
 /**
+ * Validate that an AdapterJob actually contains job posting data
+ * Returns validation result with error message if invalid
+ */
+function validateJobPosting(adapterJob: AdapterJob): { isValid: boolean; error?: string } {
+  // Check critical fields
+  const hasTitle = adapterJob.title && adapterJob.title.trim().length > 0;
+  const hasLocation = adapterJob.location && adapterJob.location.trim().length > 0;
+  
+  // Check if company_name is just the hostname (indicates no extraction)
+  let companyIsJustHostname = false;
+  try {
+    const url = new URL(adapterJob.absolute_url);
+    companyIsJustHostname = adapterJob.company_name === url.hostname || 
+                           adapterJob.company_name === url.hostname.replace('www.', '');
+  } catch {
+    // If URL parsing fails, assume company is not just hostname (safer to allow)
+    companyIsJustHostname = false;
+  }
+  
+  // Check extracted features
+  const features = adapterJob.features || {};
+  const hasSalary = !!(features.salary_min || features.salary_max);
+  const hasTimeType = !!features.time_type;
+  const hasCurrency = !!features.currency;
+  const hasDepartment = !!features.department;
+  
+  // Calculate completeness score (0-100%)
+  let completenessScore = 0;
+  if (hasTitle) completenessScore += 25;
+  if (hasLocation) completenessScore += 20;
+  if (hasSalary) completenessScore += 20;
+  if (hasTimeType) completenessScore += 10;
+  if (hasCurrency) completenessScore += 10;
+  if (hasDepartment) completenessScore += 5;
+  if (!companyIsJustHostname) completenessScore += 10;
+  
+  // Validation rules:
+  // 1. Must have title (critical)
+  if (!hasTitle) {
+    return { 
+      isValid: false, 
+      error: "No job title found. This doesn't appear to be a job posting page." 
+    };
+  }
+  
+  // 2. Must have at least location OR salary (indicates job content)
+  if (!hasLocation && !hasSalary) {
+    return { 
+      isValid: false, 
+      error: "No job location or salary information found. This doesn't appear to be a job posting page." 
+    };
+  }
+  
+  // 3. Completeness threshold: if < 30%, likely not a job posting
+  if (completenessScore < 30) {
+    return { 
+      isValid: false, 
+      error: "Insufficient job information found. This doesn't appear to be a job posting page. Please provide a direct link to a job posting." 
+    };
+  }
+  
+  // 4. If company is just hostname and no other features, likely not extracted
+  if (companyIsJustHostname && completenessScore < 40) {
+    return { 
+      isValid: false, 
+      error: "Unable to extract job information from this page. Please provide a direct link to a job posting." 
+    };
+  }
+  
+  return { isValid: true };
+}
+
+/**
  * Generate user-friendly recommendations based on red flags detected
  */
 function generateRecommendations(breakdown: Record<string, number>): string[] {
   const recommendations: string[] = [];
-  
+
   // Check if there are any red flags (scores < 0.5)
   const hasRedFlags = Object.values(breakdown).some(score => score < 0.5);
   
@@ -102,6 +177,34 @@ export async function analyzeJob(
     const adapterJob = await scrapeJobFromUrl(jobUrl);
     
     if (!adapterJob) {
+      // Check if scraping failed and whether there is an existing job - mark it as inactive
+      try {
+        const url = new URL(jobUrl);
+        const parsed = parseGreenhouseTenantAndJob(url);
+        if (parsed && (url.hostname.includes('greenhouse.io') || url.hostname.includes('job-boards.greenhouse.io'))) {
+          const { tenant, jobId } = parsed;
+          const existingJob = await getJobByCompositeKey(
+            supabase,
+            "greenhouse",
+            tenant,
+            jobId
+          );
+          
+          if (existingJob) {
+            // Job exists but can't be scraped - mark as inactive
+            await supabase
+              .from('jobs')
+              .update({ 
+                is_active: false,
+                last_seen: new Date().toISOString()
+              })
+              .eq('id', existingJob.id);
+          }
+        }
+      } catch (urlError) {
+        // URL parsing failed, continue with error return
+      }
+      
       return { success: false, error: "Unable to access this job posting. The website may be blocking automated access, or the URL may be invalid. Please try using the 'Apply Now' link from the company's careers page instead." };
     }
 
@@ -193,6 +296,16 @@ export async function analyzeJob(
       }
     } else {
       // Web jobs: ephemeral only, don't persist to DB
+      
+      // Validate that this is actually a job posting before running expensive NLP
+      const validationResult = validateJobPosting(adapterJob);
+      if (!validationResult.isValid) {
+        return { 
+          success: false, 
+          error: validationResult.error || "This doesn't appear to be a job posting. Please provide a direct link to a job posting page." 
+        };
+      }
+      
       // Generate a temporary ID for the response (won't be saved)
       jobId = `web-${Date.now()}`;
       

@@ -3,6 +3,7 @@ import type { AdapterJob } from "@/app/api/data-ingestion/adapters/types";
 import { greenhouseAdapter } from "@/app/api/data-ingestion/adapters/greenhouse";
 import { canFetchUrl } from "@/app/other/robots";
 import { webAdapter } from "@/app/api/data-ingestion/adapters/web";
+import { parseGreenhouseTenantAndJob } from "@/app/api/data-ingestion/adapters/util";
 
 /**
  * Strict denylist for aggregator/marketing boards; add as needed
@@ -52,21 +53,6 @@ function isGreenhouseBoards(url: URL): boolean {
     h === "job-boards.greenhouse.io" ||
     h.endsWith(".job-boards.greenhouse.io")
   );
-}
-
-/**
- * Parse tenant + job ID from common Greenhouse board URL forms:
- *   - /{tenant}/jobs/{jobId}
- *   - /{tenant}/jobs/{jobId}/... (extra segments ok)
- * Returns null if not matched.
- */
-function parseGreenhouseTenantAndJob(url: URL): { tenant: string; jobId: string } | null {
-  // Examples:
-  //   https://boards.greenhouse.io/stripe/jobs/7233420
-  //   https://job-boards.greenhouse.io/doordashusa/jobs/7315613#app
-  const m = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)(?:\/|$)/);
-  if (!m) return null;
-  return { tenant: m[1], jobId: m[2] };
 }
 
 /**

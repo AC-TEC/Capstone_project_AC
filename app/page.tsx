@@ -4,6 +4,8 @@ import { toast } from "react-toastify";
 import { type Tier, type RiskResult } from "@/app/orchestrator/analyzeJob";
 import { logout } from "@/utils/supabase/action";
 import { saveJobCheck } from '@/app/api/data-ingestion/save-job';
+import { useRouter } from "next/navigation";
+import { Briefcase, BookmarkPlus, Menu, X, Home } from "lucide-react";
 
 const SAMPLE_JOB = `We're looking for a rockstar developer to join our dynamic team! This is a fast-paced environment where you'll wear many hats and be a self-starter.
 
@@ -56,6 +58,11 @@ export default function GhostJobChecker() {
   const [isFetching, setIsFetching] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [fetchError, setFetchError] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false); 
+  const [lastJobId, setLastJobId] = useState<string | null>(null); 
+
+  const router = useRouter() 
+
 
   const isValidUrl = (url: string) => {
     try {
@@ -124,6 +131,8 @@ export default function GhostJobChecker() {
     setIsAnalyzing(true);
     setIsSaving(true);
     setFetchError("");
+    setLastJobId(null);             // clear previous job
+ 
 
     if (!isGreenhouseUrl(jobUrl)) {
       toast.warning(
@@ -141,6 +150,15 @@ export default function GhostJobChecker() {
     if (saveResult.success) {        
         console.log("Job successfully saved to database."); 
         toast.success("Job successfully saved to your history.");
+
+        // store job ID for Save job button
+        //added 
+        if (saveResult.jobId) {
+          setLastJobId(saveResult.jobId);
+        } else {
+          console.warn("[GhostJobChecker] saveResult has no jobId");
+        }
+
         
         // Display the score if available
         if (saveResult.score) {
@@ -161,6 +179,35 @@ export default function GhostJobChecker() {
         }
     }
   };
+
+  const handleSave = async () => { // added 
+    if (!lastJobId) {
+      toast.error("No job to save yet.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/my-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: lastJobId }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        toast.error(data.error ?? "Could not save job");
+        return;
+      }
+
+      toast.success("Job saved to My Jobs");
+    } catch (err) {
+      console.error("[handleSave] error:", err);
+      toast.error("Network error while saving job");
+    }
+  };
+
+  
   
   // Removed obsolete sample functions - they're not compatible with new analyzeJob signature
   /*
@@ -242,27 +289,99 @@ export default function GhostJobChecker() {
         }
       `}</style>
 
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 to-white">
-        {/* Header */}
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 to-white"> 
+        {/* sliding sidebar */}
+        {sidebarOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-black/30 backdrop-blur-[1px] transition-opacity"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
+
+        <aside
+          className={`fixed top-0 left-0 h-full w-64 bg-slate-900 text-white z-50 transform transition-transform duration-300 ease-in-out ${
+            sidebarOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          <div className="flex items-center justify-between p-6 border-b border-slate-800">
+            <h2 className="text-xl font-bold">
+              <span className="text-orange-500">Job</span> Busters
+            </h2>
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-1 hover:bg-slate-800 rounded"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <nav className="p-4 space-y-2">
+            {/* Analyze Jobs = active on this page */}
+            <button
+              onClick={() => {
+                setSidebarOpen(false);
+                router.push("/");
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-orange-600 text-white text-left"
+            >
+              <Home className="w-5 h-5" />
+              <span className="font-medium">Analyze Jobs</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setSidebarOpen(false);
+                router.push("/my-jobs");
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-slate-800 transition-colors text-slate-300 hover:text-white text-left"
+            >
+              <Briefcase className="w-5 h-5" />
+              <span className="font-medium">My Jobs</span>
+            </button>
+          </nav>
+
+          <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-800">
+            <button
+              onClick={async () => {
+                setSidebarOpen(false);
+                await handleLogout();
+              }}
+              className="w-full px-4 py-2 rounded-lg bg-orange-600 text-white font-medium hover:bg-orange-700 transition-colors text-sm"
+            >
+              Logout
+            </button>
+          </div>
+        </aside>
+
+        {/* Top Header */}
         <header className="sticky top-0 z-30 bg-white border-b border-orange-100 shadow-sm">
-          <div className="max-w-screen-lg mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center justify-between h-16">
-              <h1 className="text-2xl font-extrabold tracking-tight">
+          <div className="relative flex items-center justify-center h-16 px-4 sm:px-6 lg:px-8">
+            {/* menu button in the nav bar to the left*/}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="absolute left-4 p-2 hover:bg-orange-50 rounded-lg transition-colors"
+            >
+              <Menu className="w-6 h-6 text-gray-700" />
+            </button>
+
+            {/* logo in nav bar in the center*/}
+            <div className="flex flex-col items-center">
+              <h1 className="text-2xl font-extrabold tracking-tight leading-tight">
                 <span className="text-orange-600">Job</span>{" "}
                 <span className="text-slate-900">Busters</span>
               </h1>
-              <div className="flex items-center gap-4">
-                <span className="text-sm text-gray-600 hidden sm:inline">
-                  Detect suspicious job postings
-                </span>
-                <button
-                  onClick={handleLogout}
-                  className="px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 transition-colors"
-                >
-                  Logout
-                </button>
-              </div>
+              <span className="text-xs text-gray-600">
+                Detect suspicious job postings
+              </span>
             </div>
+
+            {/* Logout button in nav bar to the right */}
+            <button
+              onClick={handleLogout}
+              className="absolute right-4 px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 transition-colors"
+            >
+              Logout
+            </button>
           </div>
         </header>
 
@@ -466,8 +585,18 @@ export default function GhostJobChecker() {
               </div>
             </div>
           )}
+          {result && lastJobId && ( 
+          <button
+            onClick={handleSave}
+            className="mt-4 inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-slate-900 text-white text-sm font-medium shadow-sm hover:bg-slate-800 hover:shadow-md hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 transition-colors transition-shadow transition-transform"
+          >
+            <BookmarkPlus className="w-4 h-4" />
+            Save Job
+          </button>
+        )}
+
         </main>
-      </div>
+     </div>   
     </>
   );
 }

@@ -83,6 +83,9 @@ export async function getUser() {
     if (error) {
       return { error: error.message };
     }
+    if (!data.user) { 
+        return { error: "No active session found" };
+    }
     return data.user;
   } catch (error) {
     // @ts-ignore
@@ -420,6 +423,112 @@ export async function getJobByCompositeKey(
 }
 
 
+// Link the current user to a job (save job)
+export async function saveJobForCurrentUser(jobId: string) {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { success: false, error: "Not authenticated" };
+  }
+
+  const { error } = await supabase
+    .from("user_job_checks")
+    .upsert(
+      [
+        {
+          user_id: user.id,
+          job_id: jobId,
+        },
+      ],
+      { onConflict: "user_id,job_id" }
+    );
+
+  if (error) {
+    console.error("[saveJobForCurrentUser] error:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true };
+}
+
+export async function unsaveJobForCurrentUser(jobId: string) {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { success: false, error: "Not authenticated" };
+  }
+
+  const { error } = await supabase
+    .from("user_job_checks") 
+    .delete()
+    .eq("user_id", user.id)
+    .eq("job_id", jobId);
+
+  if (error) {
+    console.error("[unsaveJobForCurrentUser] error:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true };
+}
+
+
+export async function getSavedJobsForCurrentUser() {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    return { success: false, error: "Not authenticated" };
+  }
+
+  const { data, error } = await supabase
+    .from("user_job_checks")
+    .select(
+      `
+      job_id,
+      checked_at,
+      jobs (
+        id,
+        title,
+        company_name,
+        location,
+        absolute_url,
+        updated_at,
+        ats,
+        job_features (
+          salary_min,
+          salary_max,
+          currency,
+          time_type,
+          department
+        )
+      )
+    `
+    )
+    .eq("user_id", user.id)
+    .order("checked_at", { ascending: false });
+
+  if (error) {
+    console.error("[getSavedJobsForCurrentUser] error:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, jobs: data ?? [] };
+}
 
 
 
